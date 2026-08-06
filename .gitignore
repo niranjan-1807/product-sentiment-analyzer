@@ -1,0 +1,25 @@
+# Virtual Environment
+venv/
+ENV/
+env/
+.venv/
+
+# Environment Variables
+.env
+
+# Python caching
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+
+# Streamlit config/runtime
+.streamlit/
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Internal Developer Documentation
+roadmap.md
