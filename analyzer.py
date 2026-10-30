@@ -1,5 +1,6 @@
 import os
 import json
+import time
 import logging
 from typing import Dict, Any, Optional
 from dotenv import load_dotenv
@@ -11,8 +12,9 @@ logger = logging.getLogger(__name__)
 
 load_dotenv()
 
-# Let the model be configured via environment variables with a stable fallback
-MODEL_NAME = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+# Reliable, active default model on Groq
+DEFAULT_MODEL = "openai/gpt-oss-120b"
+MODEL_NAME = os.getenv("GROQ_MODEL", DEFAULT_MODEL)
 
 api_key = os.getenv("GROQ_API_KEY")
 client = Groq(api_key=api_key) if api_key else None
@@ -81,14 +83,15 @@ FEW_SHOT_EXAMPLES = [
     }
 ]
 
-def analyze_review(review_text: str, custom_guidelines: Optional[str] = None) -> Dict[str, Any]:
+def analyze_review(review_text: str, custom_guidelines: Optional[str] = None, model: Optional[str] = None) -> Dict[str, Any]:
     """
-    Analyzes a product review using Llama 3 model family on Groq, performing
+    Analyzes a product review using advanced LLMs on Groq, performing
     Open Aspect-Based Sentiment Analysis (ABSA) and returning a structured JSON result.
     
     Args:
         review_text (str): The raw text of the review to analyze.
         custom_guidelines (str, optional): Custom execution constraints provided by the user.
+        model (str, optional): Specific Groq model to use. Defaults to configured MODEL_NAME.
         
     Returns:
         dict: A dictionary containing overall sentiment, confidence score,
@@ -100,7 +103,8 @@ def analyze_review(review_text: str, custom_guidelines: Optional[str] = None) ->
             "sentiment": "Neutral",
             "confidence": 0.0,
             "reasoning": "Groq API client is not initialized. Please verify your GROQ_API_KEY in the .env file.",
-            "aspects": []
+            "aspects": [],
+            "error": "Groq client not initialized"
         }
         
     system_instruction = SYSTEM_PROMPT
@@ -116,23 +120,67 @@ def analyze_review(review_text: str, custom_guidelines: Optional[str] = None) ->
     
     messages.append({"role": "user", "content": f"Review: {review_text}"})
 
-    try:
-        response = client.chat.completions.create(
-            model=MODEL_NAME,
-            messages=messages,
-            response_format={"type": "json_object"},
-            temperature=0.2 # Lower temperature for deterministic classification
-        )
-        raw_json = response.choices[0].message.content
-        return json.loads(raw_json)
-    except Exception as e:
-        logger.error(f"Groq API call failed: {str(e)}")
-        return {
-            "sentiment": "Neutral",
-            "confidence": 0.0,
-            "reasoning": f"Error running analysis: {str(e)}",
-            "aspects": []
-        }
+    selected_model = model or os.getenv("GROQ_MODEL") or MODEL_NAME or DEFAULT_MODEL
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = client.chat.completions.create(
+                model=selected_model,
+                messages=messages,
+                response_format={"type": "json_object"},
+                temperature=0.2 # Lower temperature for deterministic classification
+            )
+            raw_json = response.choices[0].message.content
+            parsed = json.loads(raw_json)
+            
+            # Normalize sentiment capitalization
+            raw_sentiment = parsed.get("sentiment", "Neutral")
+            if isinstance(raw_sentiment, str):
+                normalized = raw_sentiment.strip().capitalize()
+                if normalized in ["Positive", "Neutral", "Negative"]:
+                    parsed["sentiment"] = normalized
+                elif "pos" in raw_sentiment.lower():
+                    parsed["sentiment"] = "Positive"
+                elif "neg" in raw_sentiment.lower():
+                    parsed["sentiment"] = "Negative"
+                else:
+                    parsed["sentiment"] = "Neutral"
+            else:
+                parsed["sentiment"] = "Neutral"
+
+            # Normalize aspects
+            if "aspects" in parsed and isinstance(parsed["aspects"], list):
+                for asp in parsed["aspects"]:
+                    if isinstance(asp, dict) and "sentiment" in asp and isinstance(asp["sentiment"], str):
+                        asp_sentiment = asp["sentiment"].strip().capitalize()
+                        if asp_sentiment in ["Positive", "Neutral", "Negative"]:
+                            asp["sentiment"] = asp_sentiment
+                        elif "pos" in asp["sentiment"].lower():
+                            asp["sentiment"] = "Positive"
+                        elif "neg" in asp["sentiment"].lower():
+                            asp["sentiment"] = "Negative"
+                        else:
+                            asp["sentiment"] = "Neutral"
+
+            return parsed
+        except Exception as e:
+            err_str = str(e)
+            # If rate limited (HTTP 429), back off and retry
+            if ("429" in err_str or "rate limit" in err_str.lower()) and attempt < max_retries - 1:
+                wait_time = (attempt + 1) * 2.5
+                logger.warning(f"Rate limited by Groq API. Retrying in {wait_time:.1f}s (attempt {attempt+1}/{max_retries})...")
+                time.sleep(wait_time)
+                continue
+            
+            logger.error(f"Groq API call failed: {err_str}")
+            return {
+                "sentiment": "Neutral",
+                "confidence": 0.0,
+                "reasoning": f"Error running analysis: {err_str}",
+                "aspects": [],
+                "error": err_str
+            }
 
 if __name__ == "__main__":
     test_review = "I hate the battery life. It drains in an hour. But screen is bright."

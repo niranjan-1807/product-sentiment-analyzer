@@ -15,15 +15,17 @@ client = Groq(api_key=api_key)
 
 print("Testing connection to Groq API...")
 try:
-    # We use llama-3.1-8b-instant for the test as it is fast and lightweight
+    # Use openai/gpt-oss-120b or qwen/qwen3.8-27b on Groq
+    model_to_test = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
     response = client.chat.completions.create(
-        model="llama-3.1-8b-instant",
+        model=model_to_test,
         messages=[
             {"role": "user", "content": "Say hello in 5 words."}
         ],
         max_tokens=20
     )
     print("API Connection Successful!")
+    print(f"Model used: {model_to_test}")
     print("Response:", response.choices[0].message.content)
 except Exception as e:
     print("API Connection Failed:", str(e))

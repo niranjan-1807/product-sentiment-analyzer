@@ -5,6 +5,7 @@ import streamlit as st
 import pandas as pd
 import os
 import html
+import time
 import plotly.express as px
 import plotly.figure_factory as ff
 from dotenv import load_dotenv
@@ -77,6 +78,13 @@ menu = st.sidebar.radio("Go to:", [
     "Accuracy & Evaluation"
 ])
 
+st.sidebar.markdown("---")
+st.sidebar.subheader("⚙️ Model Configuration")
+available_models = ["openai/gpt-oss-120b", "qwen/qwen3.8-27b", "openai/gpt-oss-20b"]
+configured_model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
+default_idx = available_models.index(configured_model) if configured_model in available_models else 0
+selected_model = st.sidebar.selectbox("Active Groq Model:", available_models, index=default_idx)
+
 # -------------------------------------------------------------
 # Tab 1: Dashboard Overview
 # -------------------------------------------------------------
@@ -122,8 +130,11 @@ elif menu == "Interactive Playground":
     with col_output:
         st.subheader("LLM Analysis Result")
         if analyze_btn:
-            with st.spinner("Calling Groq LLM..."):
-                result = analyze_review(review_text, custom_rules)
+            with st.spinner(f"Calling Groq LLM ({selected_model})..."):
+                result = analyze_review(review_text, custom_rules, model=selected_model)
+                
+                if "error" in result:
+                    st.error(f"⚠️ API Error encountered: {result['error']}")
                 
                 sentiment = result.get("sentiment", "Neutral")
                 conf = result.get("confidence", 0.0) * 100
@@ -193,8 +204,9 @@ elif menu == "URL Review Analyzer":
                 status_text = st.empty()
                 
                 for idx, r_text in enumerate(reviews):
-                    status_text.text(f"Analyzing review {idx+1}/{len(reviews)}...")
-                    res = analyze_review(r_text, custom_rules)
+                    status_text.text(f"Analyzing review {idx+1}/{len(reviews)} ({selected_model})...")
+                    res = analyze_review(r_text, custom_rules, model=selected_model)
+                    time.sleep(0.1)
                     
                     sentiment = res.get("sentiment", "Neutral")
                     results.append({
@@ -323,14 +335,15 @@ elif menu == "Batch Predictor (Test Data)":
             status_text = st.empty()
             
             for index, row in subset.iterrows():
-                status_text.text(f"Analyzing review {len(results)+1}/{batch_size}...")
-                res = analyze_review(row[review_col], custom_rules)
+                status_text.text(f"Analyzing review {len(results)+1}/{batch_size} ({selected_model})...")
+                res = analyze_review(row[review_col], custom_rules, model=selected_model)
                 results.append({
                     "predicted_sentiment": res.get("sentiment", "Neutral"),
                     "confidence": res.get("confidence", 0.5),
                     "reasoning": res.get("reasoning", "")
                 })
                 progress_bar.progress((len(results)) / batch_size)
+                time.sleep(0.1)
                 
             status_text.text("Batch analysis completed!")
             
@@ -369,16 +382,31 @@ elif menu == "Accuracy & Evaluation":
             
             preds = []
             progress_bar = st.progress(0)
+            status_text = st.empty()
             
+            error_count = 0
             for index, row in eval_subset.iterrows():
-                res = analyze_review(row['reviews.text'])
-                preds.append(res.get("sentiment", "Neutral"))
+                status_text.text(f"Evaluating review {len(preds)+1}/{eval_size} ({selected_model})...")
+                res = analyze_review(row['reviews.text'], model=selected_model)
+                if "error" in res:
+                    error_count += 1
+                pred_sentiment = res.get("sentiment", "Neutral")
+                preds.append(pred_sentiment)
                 progress_bar.progress((len(preds)) / eval_size)
+                time.sleep(0.15)
                 
+            status_text.text("Evaluation completed!")
             eval_subset['predicted'] = preds
             
+            if error_count > 0:
+                st.warning(f"⚠️ {error_count} reviews encountered API errors or rate limit issues during evaluation.")
+            
+            # Normalize casing for accurate comparison
+            eval_subset['sentiment_norm'] = eval_subset['sentiment'].astype(str).str.strip().str.capitalize()
+            eval_subset['predicted_norm'] = eval_subset['predicted'].astype(str).str.strip().str.capitalize()
+            
             # Calculate metrics
-            correct = (eval_subset['sentiment'] == eval_subset['predicted']).sum()
+            correct = (eval_subset['sentiment_norm'] == eval_subset['predicted_norm']).sum()
             accuracy = correct / eval_size
             
             st.write("---")
@@ -397,10 +425,13 @@ elif menu == "Accuracy & Evaluation":
             
             for index, row in eval_subset.iterrows():
                 try:
-                    true_idx = labels.index(row['sentiment'])
-                    pred_idx = labels.index(row['predicted'])
-                    matrix[true_idx][pred_idx] += 1
-                except ValueError:
+                    true_val = row['sentiment_norm']
+                    pred_val = row['predicted_norm']
+                    if true_val in labels and pred_val in labels:
+                        true_idx = labels.index(true_val)
+                        pred_idx = labels.index(pred_val)
+                        matrix[true_idx][pred_idx] += 1
+                except Exception:
                     pass
             
             fig = ff.create_annotated_heatmap(
@@ -414,7 +445,7 @@ elif menu == "Accuracy & Evaluation":
             st.plotly_chart(fig, use_container_width=True)
             
             st.subheader("Incorrect Predictions Log")
-            errors = eval_subset[eval_subset['sentiment'] != eval_subset['predicted']]
+            errors = eval_subset[eval_subset['sentiment_norm'] != eval_subset['predicted_norm']]
             st.dataframe(errors[['reviews.text', 'sentiment', 'predicted']], use_container_width=True)
     else:
         st.warning("Could not find train_data.csv in this directory.")
